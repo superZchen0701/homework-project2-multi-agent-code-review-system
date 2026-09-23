@@ -1,0 +1,25 @@
+{
+  "name": "multi-agent-code-review-system",
+  "version": "1.0.0",
+  "description": "基于多智能体协作 + 代码 RAG 的 GitHub 仓库代码审查系统",
+  "author": "chaozhi Chen",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "review": "node src/index.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^8.0.5",
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.14",
+    "@langchain/openai": "^1.5.11",
+    "dotenv": "^17.4.2",
+    "zod": "^4.6.5"
+  }
+}

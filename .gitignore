@@ -1,0 +1,20 @@
+# 环境变量
+.env
+
+# 依赖
+node_modules/
+pnpm-lock.yaml
+
+# 运行时克隆的仓库
+repos/
+
+# 输出报告
+reports/
+
+# 运行截图
+screenshots/
+
+# 系统文件
+.DS_Store
+*.log
+.workbuddy/
