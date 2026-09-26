@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createReviewApp } from './graph.js';
+import { trace } from './agent-trace.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -57,6 +58,10 @@ async function main() {
   console.log('═'.repeat(70));
   console.log(`\n🎯 目标仓库: ${githubUrl}`);
 
+  // Trace：标记本次运行元信息
+  trace.runMeta = { githubUrl };
+  trace.step({ name: 'run.start', input: { githubUrl }, output: '开始执行', tokens: null, durationMs: null });
+
   // 构建并执行工作流
   const app = createReviewApp();
   const result = await app.invoke({ githubUrl });
@@ -86,10 +91,25 @@ async function main() {
   console.log('─'.repeat(70));
   console.log(markdown.slice(0, 3000) + (markdown.length > 3000 ? '\n\n...(已截断，完整内容见报告文件)' : ''));
 
+  // Trace 汇总：总步骤数、Token 消耗、总耗时、trace 文件位置
+  const traceStats = trace.summary();
+  console.log('\n' + '─'.repeat(70));
+  console.log('🧾 Trace 汇总:');
+  console.log(`   步骤总数: ${traceStats.totalSteps}（错误 ${traceStats.errorCount} 个）`);
+  console.log(`   Token 消耗: 输入 ${traceStats.tokenInput} / 输出 ${traceStats.tokenOutput} / 总计 ${traceStats.tokenTotal}`);
+  console.log(`   累计耗时: ${(traceStats.totalDurationMs / 1000).toFixed(1)}s`);
+  console.log(`   Trace 文件: ${path.relative(PROJECT_ROOT, traceStats.traceFile)}`);
+
   console.log('\n✅ 全部完成');
 }
 
 main().catch((err) => {
+  // 失败时也输出 trace 汇总，便于定位是哪一步出错
+  if (trace.records.length > 0) {
+    const traceStats = trace.summary();
+    console.error(`\n🧾 Trace 汇总: 步骤 ${traceStats.totalSteps} / 错误 ${traceStats.errorCount} / tokens ${traceStats.tokenTotal}`);
+    console.error(`   Trace 文件: ${traceStats.traceFile}`);
+  }
   console.error('\n❌ 执行失败:', err);
   console.error(err.stack);
   process.exit(1);

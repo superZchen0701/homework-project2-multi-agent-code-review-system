@@ -14,6 +14,9 @@ reports/
 # 运行截图
 screenshots/
 
+# Agent Trace 日志
+traces/
+
 # 系统文件
 .DS_Store
 *.log

@@ -23,6 +23,7 @@ import { CodeRAG } from './tools/code-rag.js';
 import { orchestratorNode } from './agents/orchestrator.js';
 import { reviewerWorker } from './agents/reviewer.js';
 import { synthesizerNode } from './agents/synthesizer.js';
+import { trace } from './agent-trace.js';
 
 // ======================================================================
 // 主图 State
@@ -67,15 +68,33 @@ const WorkerState = Annotation.Root({
 /** Clone 节点：GitHub URL → 本地仓库 */
 async function cloneNode(state) {
   console.log('\n📥 [clone] 开始克隆仓库...');
+  const start = Date.now();
   const { localPath, repoName } = cloneRepo(state.githubUrl);
+  // Trace：记录克隆耗时与产物路径
+  trace.step({
+    name: 'clone',
+    input: { githubUrl: state.githubUrl },
+    output: { localPath, repoName },
+    tokens: null,
+    durationMs: Date.now() - start,
+  });
   return { repoPath: localPath, repoName };
 }
 
 /** Index 节点：本地仓库 → CodeRAG 向量索引 */
 async function indexNode(state) {
   console.log('\n🏗️  [index] 构建 CodeRAG 索引...');
+  const start = Date.now();
   const rag = new CodeRAG(state.repoPath);
   await rag.buildIndex();
+  // Trace：记录索引构建耗时与片段数
+  trace.step({
+    name: 'index',
+    input: { repoPath: state.repoPath },
+    output: { chunkCount: rag.store.length },
+    tokens: null,
+    durationMs: Date.now() - start,
+  });
   return { rag };
 }
 

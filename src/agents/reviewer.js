@@ -13,6 +13,7 @@ import { HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messag
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { llm } from '../config.js';
+import { trace } from '../agent-trace.js';
 import { formatSearchResults } from '../tools/code-rag.js';
 
 // ======================================================================
@@ -173,7 +174,8 @@ ${task.focusAreas?.length ? task.focusAreas.map((f) => `  • "${f}" 相关逻�
   const MAX_TURNS = 5;
 
   while (turn < MAX_TURNS) {
-    currentResp = await modelWithTools.invoke(messages);
+    // Trace：记录每轮 LLM 调用的输入输出、token 消耗、耗时
+    currentResp = await trace.traceLLM(modelWithTools, `reviewer.${dim}.turn${turn + 1}`, messages);
     messages.push(currentResp);
     turn++;
 
@@ -183,7 +185,10 @@ ${task.focusAreas?.length ? task.focusAreas.map((f) => `  • "${f}" 相关逻�
     // 执行所有 tool_calls（本实现中只会有 code_search）
     for (const tc of toolCalls) {
       console.log(`   🛠️  [${task.dimensionName}] 调用 code_search: ${tc.args?.query?.slice(0, 60)}...`);
+      const toolStart = Date.now();
       const toolResult = await searchTool.invoke(tc.args);
+      // Trace：记录工具调用入参、结果、耗时
+      trace.traceTool(`reviewer.${dim}.tool`, 'code_search', tc.args, toolResult, Date.now() - toolStart);
       messages.push(new ToolMessage({
         tool_call_id: tc.id,
         content: toolResult,

@@ -12,6 +12,7 @@
  */
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { llm } from '../config.js';
+import { trace } from '../agent-trace.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -123,7 +124,7 @@ export async function orchestratorNode(state) {
 
   let focusMap = {};
   try {
-    const resp = await llm.invoke(prompt);
+    const resp = await trace.traceLLM(llm, 'orchestrator.plan', prompt);
     const content = resp.content.toString().trim();
     const jsonMatch = content.match(/```json\s*([\s\S]*?)```/) || content.match(/(\{[\s\S]*\})/);
     const parsed = JSON.parse(jsonMatch ? jsonMatch[1].trim() : content);

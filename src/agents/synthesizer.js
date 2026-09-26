@@ -11,6 +11,7 @@
  */
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { llm } from '../config.js';
+import { trace } from '../agent-trace.js';
 
 // ======================================================================
 // 纯代码基础汇总（不依赖 LLM，保证最低可用报告）
@@ -181,7 +182,7 @@ export async function synthesizerNode(state) {
       issueCount: w.review?.issues?.length || 0,
     }));
 
-    const resp = await llm.invoke([
+    const promptMessages = [
       new SystemMessage(
         `你是代码审查报告的首席编辑。请根据下面的 4 维度审查统计，输出一段**精炼的执行摘要**（3-5 句话），作为报告开头的"Executive Summary"。
 
@@ -194,7 +195,10 @@ export async function synthesizerNode(state) {
       new HumanMessage(
         `仓库：${state.repoName}\nGitHub: ${state.githubUrl}\n\n审查统计：\n${JSON.stringify(workerJson, null, 2)}`
       ),
-    ]);
+    ];
+
+    // Trace：记录执行摘要生成的输入输出、token 消耗、耗时
+    const resp = await trace.traceLLM(llm, 'synthesizer.executive-summary', promptMessages);
 
     const executiveSummary = resp.content.toString().trim();
 
