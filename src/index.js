@@ -99,6 +99,9 @@ async function main() {
   console.log(`   Token 消耗: 输入 ${traceStats.tokenInput} / 输出 ${traceStats.tokenOutput} / 总计 ${traceStats.tokenTotal}`);
   console.log(`   累计耗时: ${(traceStats.totalDurationMs / 1000).toFixed(1)}s`);
   console.log(`   Trace 文件: ${path.relative(PROJECT_ROOT, traceStats.traceFile)}`);
+  if (traceStats.costReportFile) {
+    console.log(`   成本报告: ${path.relative(PROJECT_ROOT, traceStats.costReportFile)}（随 trace 自动生成）`);
+  }
 
   console.log('\n✅ 全部完成');
 }
@@ -109,6 +112,9 @@ main().catch((err) => {
     const traceStats = trace.summary();
     console.error(`\n🧾 Trace 汇总: 步骤 ${traceStats.totalSteps} / 错误 ${traceStats.errorCount} / tokens ${traceStats.tokenTotal}`);
     console.error(`   Trace 文件: ${traceStats.traceFile}`);
+    if (traceStats.costReportFile) {
+      console.error(`   成本报告: ${traceStats.costReportFile}（随 trace 自动生成）`);
+    }
   }
   console.error('\n❌ 执行失败:', err);
   console.error(err.stack);

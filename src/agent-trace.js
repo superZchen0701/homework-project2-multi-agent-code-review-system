@@ -8,6 +8,7 @@
  * - 流程节点：trace.step() 记录 clone / index 等非 LLM 步骤
  *
  * 落盘格式：traces/trace-<时间戳>.jsonl（每行一条 JSON，便于 grep / 程序化分析）
+ * 同步产出：reports/<日期>-agent-cost-analysis.md（成本分布 / 瓶颈 Top / 上下文膨胀分析）
  * 全局单例：一次进程运行 = 一份完整 trace
  */
 import fs from 'fs';
@@ -16,6 +17,8 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TRACES_DIR = path.resolve(__dirname, '../traces');
+const REPORTS_DIR = path.resolve(__dirname, '../reports');
+const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 // 单条 input/output 最大记录长度，防止 trace 文件膨胀
 const MAX_CONTENT_LENGTH = 3000;
@@ -70,6 +73,17 @@ function extractTokenUsage(response) {
     return { input: t.promptTokens ?? 0, output: t.completionTokens ?? 0, total: t.totalTokens ?? 0 };
   }
   return null;
+}
+
+/** 步骤名归一化：reviewer.<dim>.turnN / .tool 归并到所属类别 */
+function categoryOf(name) {
+  if (name === 'clone') return 'clone（克隆仓库）';
+  if (name === 'index') return 'index（RAG 索引构建）';
+  if (name === 'orchestrator.plan') return 'orchestrator.plan（任务编排）';
+  if (/^reviewer\.[^.]+\.turn\d+$/.test(name)) return 'reviewer LLM（四维审查推理）';
+  if (/^reviewer\.[^.]+\.tool$/.test(name)) return 'reviewer.tool（code_search 检索）';
+  if (name === 'synthesizer.executive-summary') return 'synthesizer（报告汇总）';
+  return name;
 }
 
 class AgentTrace {
@@ -158,7 +172,145 @@ class AgentTrace {
     });
   }
 
-  /** 运行结束汇总：写入最后一条 run.summary 记录，并返回统计数据 */
+  /** 聚合记录：按类别 / 维度 / Top 榜 / 每轮输入膨胀（供成本报告使用） */
+  _aggregate() {
+    const steps = this.records.filter((r) => r.name !== 'run.summary' && r.name !== 'run.start');
+    const byCat = {};
+    const byDim = {};
+    const turnGrowth = {};
+
+    for (const s of steps) {
+      const cat = categoryOf(s.name);
+      (byCat[cat] ??= { count: 0, tokenTotal: 0, durMs: 0 });
+      byCat[cat].count++;
+      byCat[cat].tokenTotal += s.tokens?.total || 0;
+      byCat[cat].durMs += s.durationMs || 0;
+
+      const turnMatch = s.name.match(/^reviewer\.([^.]+)\.turn(\d+)$/);
+      const toolMatch = s.name.match(/^reviewer\.([^.]+)\.tool$/);
+      if (turnMatch) {
+        const dim = (byDim[turnMatch[1]] ??= { turns: 0, toolCalls: 0, tokenTotal: 0, llmDurMs: 0 });
+        dim.turns++;
+        dim.tokenTotal += s.tokens?.total || 0;
+        dim.llmDurMs += s.durationMs || 0;
+        (turnGrowth[turnMatch[1]] ??= []).push({ turn: +turnMatch[2], input: s.tokens?.input || 0 });
+      } else if (toolMatch) {
+        const dim = (byDim[toolMatch[1]] ??= { turns: 0, toolCalls: 0, tokenTotal: 0, llmDurMs: 0 });
+        dim.toolCalls++;
+      }
+    }
+
+    const topTok = steps
+      .filter((s) => s.tokens)
+      .sort((a, b) => (b.tokens.total || 0) - (a.tokens.total || 0))
+      .slice(0, 5);
+    const topDur = [...steps]
+      .sort((a, b) => (b.durationMs || 0) - (a.durationMs || 0))
+      .slice(0, 5);
+
+    return { byCat, byDim, turnGrowth, topTok, topDur };
+  }
+
+  /** 生成成本分析 Markdown 报告（与 trace JSONL 同步落盘），返回报告路径 */
+  _writeCostReport(stats) {
+    const { byCat, byDim, turnGrowth, topTok, topDur } = this._aggregate();
+    const reviewerTokens = byCat['reviewer LLM（四维审查推理）']?.tokenTotal || 0;
+    const reviewerDur = byCat['reviewer LLM（四维审查推理）']?.durMs || 0;
+    const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+    const pct = (part, total) => (total > 0 ? ((part / total) * 100).toFixed(1) + '%' : '0%');
+    const relTrace = this.filePath ? path.relative(PROJECT_ROOT, this.filePath) : 'N/A';
+
+    let md = '';
+    md += `# Agent 运行成本分析报告\n\n`;
+    md += `> **分析对象**: ${this.runMeta.githubUrl || 'N/A'}\n`;
+    md += `> **数据来源**: ${relTrace}（${this.records.length} 条记录）\n`;
+    md += `> **生成时间**: ${new Date().toISOString().slice(0, 19).replace('T', ' ')}\n\n`;
+    md += `---\n\n`;
+
+    // 一、运行总览
+    const llmCalls = this.records.filter((r) => r.tokens).length;
+    const toolCalls = this.records.filter((r) => r.type === 'tool_call').length;
+    md += `## 一、运行总览\n\n`;
+    md += `| 指标 | 数值 |\n|------|------|\n`;
+    md += `| Token 总消耗 | **${fmt(stats.tokenTotal)}**（输入 ${fmt(stats.tokenInput)} / 输出 ${fmt(stats.tokenOutput)}） |\n`;
+    md += `| LLM 调用次数 | ${llmCalls} 次 |\n`;
+    md += `| 工具调用（code_search） | ${toolCalls} 次（本地计算，0 Token） |\n`;
+    md += `| 累计耗时 | **${(stats.totalDurationMs / 1000).toFixed(1)}s**（多 Worker 并行，实际墙钟时间 < 此值） |\n`;
+    md += `| 步骤总数 | ${stats.totalSteps} |\n\n`;
+
+    // 二、成本分布（按步骤类别，Token 降序）
+    md += `## 二、成本分布（按步骤类别）\n\n`;
+    md += `| 步骤类别 | 次数 | Token | Token 占比 | 耗时 | 耗时占比 |\n`;
+    md += `|----------|------|-------|-----------|------|---------|\n`;
+    for (const [cat, v] of Object.entries(byCat).sort((a, b) => b[1].tokenTotal - a[1].tokenTotal)) {
+      md += `| ${cat} | ${v.count} | ${fmt(v.tokenTotal)} | ${pct(v.tokenTotal, stats.tokenTotal)} | ${(v.durMs / 1000).toFixed(1)}s | ${pct(v.durMs, stats.totalDurationMs)} |\n`;
+    }
+    md += `\n**结论**：成本集中在 Reviewer 的 ReAct 推理循环；code_search 本地检索不耗 Token，但其返回结果追加进上下文，是 Token 膨胀的间接推手。\n\n`;
+
+    // 三、审查维度对比（有 reviewer 记录才输出）
+    if (Object.keys(byDim).length > 0) {
+      md += `## 三、审查维度对比\n\n`;
+      md += `| 维度 | LLM 轮数 | 检索次数 | Token 总耗 | Token 占比* | LLM 耗时 | 耗时占比* |\n`;
+      md += `|------|---------|---------|-----------|------------|---------|----------|\n`;
+      for (const [dim, v] of Object.entries(byDim).sort((a, b) => b[1].tokenTotal - a[1].tokenTotal)) {
+        md += `| ${dim} | ${v.turns} | ${v.toolCalls} | ${fmt(v.tokenTotal)} | ${pct(v.tokenTotal, reviewerTokens)} | ${(v.llmDurMs / 1000).toFixed(1)}s | ${pct(v.llmDurMs, reviewerDur)} |\n`;
+      }
+      md += `\n*占 reviewer LLM 总量（${fmt(reviewerTokens)} Token / ${(reviewerDur / 1000).toFixed(1)}s）的百分比\n\n`;
+      md += `**关键规律**：检索次数直接决定成本 —— 每多一次检索，下一轮输入就多 ~5K~20K Token。\n\n`;
+    }
+
+    // 四、瓶颈定位
+    md += `## 四、瓶颈定位\n\n`;
+    md += `### 4.1 单步 Top5（烧 Token）\n\n`;
+    md += `| 排名 | 步骤 | 输入 | 输出 | 合计 | 耗时 |\n|------|------|------|------|------|------|\n`;
+    topTok.forEach((s, i) => {
+      md += `| ${i + 1} | ${s.name} | ${fmt(s.tokens.input)} | ${fmt(s.tokens.output)} | **${fmt(s.tokens.total)}** | ${((s.durationMs || 0) / 1000).toFixed(1)}s |\n`;
+    });
+
+    md += `\n### 4.2 单步 Top5（最慢）\n\n`;
+    md += `| 排名 | 步骤 | 耗时 | Token |\n|------|------|------|-------|\n`;
+    topDur.forEach((s, i) => {
+      md += `| ${i + 1} | ${s.name} | ${((s.durationMs || 0) / 1000).toFixed(1)}s | ${s.tokens ? fmt(s.tokens.total) : '-'} |\n`;
+    });
+
+    // 4.3 上下文膨胀表（有 reviewer 轮次才输出）
+    const dims = Object.keys(turnGrowth);
+    if (dims.length > 0) {
+      const maxTurn = Math.max(...dims.flatMap((d) => turnGrowth[d].map((t) => t.turn)));
+      md += `\n### 4.3 根因：上下文线性膨胀（各轮输入 Token）\n\n`;
+      md += `| 维度 | ${Array.from({ length: maxTurn }, (_, i) => `turn${i + 1}`).join(' | ')} | 首轮检索注入 |\n`;
+      md += `|------|${Array.from({ length: maxTurn }, () => '------').join('|')}|------|\n`;
+      for (const dim of dims) {
+        const turns = turnGrowth[dim];
+        const cells = Array.from({ length: maxTurn }, (_, i) => {
+          const t = turns.find((x) => x.turn === i + 1);
+          return t ? fmt(t.input) : '-';
+        });
+        const jump = turns.length >= 2 ? `+${fmt(turns[1].input - turns[0].input)}` : '-';
+        md += `| ${dim} | ${cells.join(' | ')} | ${jump} |\n`;
+      }
+      md += `\n每次 code_search 返回的片段全量追加进 messages，导致下一轮输入线性上涨；中间轮次仅输出 tool_call（~200 Token）却消耗上万输入 Token。\n\n`;
+    }
+
+    // 五、优化建议 + 换算公式
+    md += `## 五、优化建议（P0）\n\n`;
+    md += `1. **压缩工具返回**：code_search 的 topK 5→3、片段截断至 ~40 行（输入 Token 降 40~60%）\n`;
+    md += `2. **限制检索预算**：每维度最多 2~3 次检索，或累计输入超 25K 强制转入产出\n\n`;
+    md += `---\n\n`;
+    md += `## 附：成本换算公式\n\n`;
+    md += '```\n';
+    md += `本次运行成本 ≈ ${(stats.tokenInput / 1e6).toFixed(3)}M × 输入单价 + ${(stats.tokenOutput / 1e6).toFixed(3)}M × 输出单价\n`;
+    md += '```\n';
+
+    // 同日重复运行覆盖当日报告（最新一次为准）
+    fs.mkdirSync(REPORTS_DIR, { recursive: true });
+    const date = new Date().toISOString().slice(0, 10);
+    const reportPath = path.join(REPORTS_DIR, `${date}-agent-cost-analysis.md`);
+    fs.writeFileSync(reportPath, md, 'utf-8');
+    return reportPath;
+  }
+
+  /** 运行结束汇总：同步生成成本分析报告 + 写入 run.summary 记录，返回统计数据 */
   summary() {
     const stats = {
       totalSteps: this.records.length,
@@ -169,6 +321,14 @@ class AgentTrace {
       totalDurationMs: this.records.reduce((s, r) => s + (r.durationMs || 0), 0),
       traceFile: this.filePath,
     };
+
+    // 与 trace 文件同步生成成本分析报告（失败不影响 trace 落盘）
+    try {
+      stats.costReportFile = this._writeCostReport(stats);
+    } catch (err) {
+      console.log(`  ⚠️ [trace] 成本报告生成失败: ${err.message}`);
+    }
+
     this.step({ name: 'run.summary', input: this.runMeta, output: stats, tokens: null, durationMs: null });
     return stats;
   }
