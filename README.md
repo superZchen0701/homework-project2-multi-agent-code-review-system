@@ -8,6 +8,7 @@
 - 🧬 **Code RAG**：AST 感知分片 + 语义向量检索，让 Agent 精准定位代码片段而非全文扫描
 - 🎯 **四维度审查**：代码质量 / 潜在 Bug / 性能问题 / 安全风险，覆盖最常见的代码缺陷类型
 - 📄 **结构化报告**：自动生成 Markdown 格式审查报告，含评分仪表盘、问题清单、修复建议
+- 📊 **Trace 追踪**：每步记录输入输出 / Token 消耗 / 耗时，落盘 JSONL 并自动生成成本分析报告
 
 ## 🏗️ 系统架构
 
@@ -48,8 +49,8 @@ flowchart TD
 
 ```
 START → clone → index → orchestrator ─┬─→ reviewerWorker × 4（并行）→ synthesizer → END
-                                       │
-                                       └─ concat reducer 累积 4 路结果
+                                      │
+                                      └─ concat reducer 累积 4 路结果
 ```
 
 - **Send 扇出**：orchestrator 运行时生成 4 个 subtask，路由函数为每个生成独立 State 副本
@@ -61,9 +62,10 @@ START → clone → index → orchestrator ─┬─→ reviewerWorker × 4（�
 ```
 .
 ├── src/
-│   ├── index.js               # 入口：命令行解析 + 报告落盘
+│   ├── index.js               # 入口：命令行解析 + 报告落盘 + Trace 汇总
 │   ├── config.js              # DeepSeek + 智谱 Embedding 配置
 │   ├── graph.js               # LangGraph 工作流组装
+│   ├── agent-trace.js         # Trace 日志：逐步记录 + 成本分析报告生成
 │   ├── tools/
 │   │   ├── git-clone.js       # GitHub 浅克隆
 │   │   └── code-rag.js        # AST 分片 + 向量索引 + 语义检索
@@ -71,7 +73,8 @@ START → clone → index → orchestrator ─┬─→ reviewerWorker × 4（�
 │       ├── orchestrator.js    # 任务分解（固定 4 维度）
 │       ├── reviewer.js        # 四维审查 Worker（ReAct: tool_call → 审查）
 │       └── synthesizer.js     # Markdown 报告汇总
-├── reports/                   # 审查报告输出目录
+├── reports/                   # 审查报告 + 成本分析报告输出目录
+├── traces/                    # Agent Trace JSONL 日志（.gitignore）
 ├── repos/                     # 运行时克隆的仓库（.gitignore）
 ├── .env                       # 真实 API Key（.gitignore）
 ├── .env.example               # 环境变量模板
@@ -114,8 +117,26 @@ pnpm start https://github.com/superZchen0701/homework-project1-personal-agent.gi
 
 ```bash
 ls reports/
-# 2026-09-23-superZchen0701-review.md
+# 2026-09-23-superZchen0701-review.md        ← 审查报告
+# 2026-09-26-agent-cost-analysis.md          ← 成本分析报告（自动生成）
+ls traces/
+# trace-2026-09-26T03-23-42.jsonl            ← Agent Trace 日志
 ```
+
+## 📊 Trace 日志与成本分析
+
+每次运行自动记录全链路 Trace，运行结束时终端输出汇总（步骤数 / Token 三项合计 / 累计耗时 / 文件位置）：
+
+| 记录点 | 内容 |
+|--------|------|
+| `traceLLM` | 包装每次 LLM 调用：输入消息、输出 content + tool_calls、Token（`usage_metadata`）、耗时；异常也记录后原样抛出 |
+| `traceTool` | code_search 入参、结果、耗时（本地检索，0 Token） |
+| `trace.step` | clone / index 等非 LLM 步骤耗时与产物 |
+| `summary()` | 汇总统计 + 同步生成成本分析报告 |
+
+- **JSONL 落盘**：`traces/trace-<时间戳>.jsonl`，每行一条 JSON，单字段超 3000 字符自动截断
+- **成本分析报告**：`reports/<日期>-agent-cost-analysis.md`，含成本分布（按步骤类别 / 审查维度）、单步 Token & 耗时 Top5、上下文膨胀表、P0 优化建议；同日重复运行以最新一次为准
+- 分析维度：哪一步最烧 Token / 最慢、检索轮次与 Token 膨胀的对应关系
 
 ## 🎯 审查维度详解
 
@@ -185,7 +206,8 @@ AST 解析 → 函数/类级分片 → Embedding → 向量索引 → 语义检�
 - 单仓库最多索引 200 个代码文件，防止 Embedding API 爆配额
 - 非 JS/TS 项目按行切块（60 行/块，10 行重叠）
 - 空仓库 / 无代码文件有保护，不调 Embedding API
-- `.env` 和 `repos/` 均在 `.gitignore` 中
+- `.env`、`repos/`、`traces/`、`screenshots/` 均在 `.gitignore` 中
+- 成本报告按天命名，同日多次运行会覆盖（trace JSONL 不会被覆盖，可回溯）
 
 ## 📄 License
 

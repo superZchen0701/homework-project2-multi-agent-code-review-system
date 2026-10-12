@@ -8,6 +8,7 @@ A GitHub repository code review system built on **LangGraph** + **Code RAG**. In
 - 🧬 **Code RAG**: AST-aware chunking + semantic vector retrieval lets Agents pinpoint relevant code instead of scanning everything.
 - 🎯 **4 Review Dimensions**: Code Quality / Potential Bugs / Performance / Security — covering the most common code defects.
 - 📄 **Structured Reports**: Auto-generated Markdown with score dashboard, issue lists, and fix suggestions.
+- 📊 **Trace Logging**: Records every step's input/output, token usage, and latency; writes JSONL and auto-generates a cost analysis report.
 
 ## 🏗️ Architecture
 
@@ -48,8 +49,8 @@ flowchart TD
 
 ```
 START → clone → index → orchestrator ─┬─→ reviewerWorker × 4 (parallel) → synthesizer → END
-                                       │
-                                       └─ concat reducer accumulates 4-way results
+                                      │
+                                      └─ concat reducer accumulates 4-way results
 ```
 
 - **`Send` fan-out**: Orchestrator produces 4 subtasks at runtime; the router generates an isolated State copy for each.
@@ -61,9 +62,10 @@ START → clone → index → orchestrator ─┬─→ reviewerWorker × 4 (par
 ```
 .
 ├── src/
-│   ├── index.js               # Entry point: CLI parsing + report writer
+│   ├── index.js               # Entry point: CLI parsing + report writer + trace summary
 │   ├── config.js              # DeepSeek + Zhipu Embedding config
 │   ├── graph.js               # LangGraph workflow assembly
+│   ├── agent-trace.js         # Trace logging: per-step records + cost report generation
 │   ├── tools/
 │   │   ├── git-clone.js       # GitHub shallow clone
 │   │   └── code-rag.js        # AST chunking + vector index + semantic search
@@ -71,7 +73,8 @@ START → clone → index → orchestrator ─┬─→ reviewerWorker × 4 (par
 │       ├── orchestrator.js    # Task decomposition (fixed 4 dimensions)
 │       ├── reviewer.js        # Review Worker (ReAct: tool_call → review)
 │       └── synthesizer.js     # Markdown report compilation
-├── reports/                   # Report output directory
+├── reports/                   # Review report + cost analysis report output
+├── traces/                    # Agent Trace JSONL logs (.gitignore)
 ├── repos/                     # Runtime-cloned repos (.gitignore)
 ├── .env                       # Real API keys (.gitignore)
 ├── .env.example               # Env var template
@@ -110,12 +113,30 @@ BIGMODEL_EMBEDDING_API_KEY=xxxxxxxx
 pnpm start https://github.com/superZchen0701/homework-project1-personal-agent.git
 ```
 
-### 4. View the report
+### 4. View the reports
 
 ```bash
 ls reports/
-# 2026-09-23-superZchen0701-review.md
+# 2026-09-23-superZchen0701-review.md        ← review report
+# 2026-09-26-agent-cost-analysis.md          ← cost analysis report (auto-generated)
+ls traces/
+# trace-2026-09-26T03-23-42.jsonl            ← Agent trace log
 ```
+
+## 📊 Trace Logging & Cost Analysis
+
+Every run records a full-pipeline trace; a summary is printed at the end (step count / token totals / cumulative latency / file paths):
+
+| Recorder | What it captures |
+|----------|------------------|
+| `traceLLM` | Wraps each LLM call: input messages, output content + tool_calls, tokens (`usage_metadata`), latency; errors are recorded then rethrown |
+| `traceTool` | code_search args, result, latency (local retrieval, 0 tokens) |
+| `trace.step` | Non-LLM steps (clone / index) latency and artifacts |
+| `summary()` | Aggregate stats + synchronized cost report generation |
+
+- **JSONL output**: `traces/trace-<timestamp>.jsonl`, one JSON record per line; fields over 3000 chars are truncated
+- **Cost analysis report**: `reports/<date>-agent-cost-analysis.md` — cost breakdown (per step category / review dimension), single-step token & latency Top5, context bloat table, P0 optimization suggestions; same-day runs overwrite the daily report (latest wins)
+- Analysis angles: which step burns the most tokens / is the slowest, and how retrieval rounds map to token growth
 
 ## 🎯 Review Dimensions
 
@@ -185,7 +206,8 @@ AST parse → function/class chunks → Embedding → Vector index → Semantic 
 - Max 200 code files indexed per repo to avoid Embedding API quota blow-ups.
 - Non-JS/TS files fall back to line-based chunking (60 lines/block, 10-line overlap).
 - Empty repos / repos with no code files are guarded — no wasted Embedding calls.
-- `.env` and `repos/` are in `.gitignore`.
+- `.env`, `repos/`, `traces/`, and `screenshots/` are all in `.gitignore`.
+- The cost report is named by day — same-day runs overwrite it (trace JSONLs are never overwritten and remain fully traceable).
 
 ## 📄 License
 
